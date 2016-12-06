@@ -213,9 +213,8 @@ def _skip_to_line(search, pipe):
 def _run_hash(h, inpipe, outpipe, args=[]):
 	o = inpipe.read(chunksize)
 	while o:
+		h.update(o)
 		o = inpipe.read(chunksize)
-		if o:
-			h.update(o)
 	outpipe.write(h.hexdigest())
 
 def rotate_through(array):
