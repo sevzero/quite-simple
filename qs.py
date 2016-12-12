@@ -142,6 +142,7 @@ def http_request(inpipe, outpipe, args=[]):
 		requested_index = 0
 	request_search = re.compile(r'^(GET|POST|HEAD|PUT|OPTIONS) .* HTTP/.*$')
 	content_length = None
+	expect = None
 	for i in xrange(requested_index+1):
 		o = _skip_to_line(request_search, inpipe)
 	while True:
@@ -152,21 +153,29 @@ def http_request(inpipe, outpipe, args=[]):
 				content_length = int(o.split(':')[1].strip())
 			except ValueError:
 				pass
+		if o.startswith('Expect:'):
+			expect = True
 		outpipe.write(o)
 		o = inpipe.readline()
+	if expect:
+		inpipe.readline()
+		inpipe.readline()
 	if content_length:
 		_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
 
 def http_response(inpipe, outpipe, args=[]):
-	#TODO: Fix for HTTP chunked encoding
 	try:
 		requested_index = int(args[0]) if args else 0
 	except ValueError:
 		requested_index = 0
 	index = 0
 	content_length = None
+	chunked = None
 	for i in xrange(requested_index+1):
-		o = _skip_to_line('HTTP/', inpipe)
+		while True:
+			o = _skip_to_line('HTTP/', inpipe)
+			if not '100 Continue' in o:
+				break
 	while True:
 		outpipe.write(o)
 		if not len(o.strip()):
@@ -176,8 +185,20 @@ def http_response(inpipe, outpipe, args=[]):
 				content_length = int(o.split(':')[1].strip())
 			except ValueError:
 				pass
+		if o.startswith('Transfer-Encoding: chunked'):
+			chunked = True
 		o = inpipe.readline()
-	_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+	if not chunked:
+		_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+	try:
+		o = inpipe.readline()
+		content_length = int(o.strip(), 16)
+		while content_length:
+			_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+			content_length = int(inpipe.readline().strip(), 16)
+	except ValueError:
+		return
+
 
 # Utils
 
@@ -186,13 +207,16 @@ def _buffered_transfer(inpipe, outpipe, bytes=None, chunksize=4096):
 	if bytes:
 		chunks = bytes/chunksize
 		remainder = bytes % chunksize
-	for chunk in xrange(chunks) if bytes else itertools.count():
-		data = inpipe.read(chunksize)
-		if not data:
-			return
-		outpipe.write(data)
-	if remainder:
-		outpipe.write(inpipe.read(remainder))
+	try:
+		for chunk in xrange(chunks) if bytes else itertools.count():
+			data = inpipe.read(chunksize)
+			if not data:
+				return
+			outpipe.write(data)
+		if remainder:
+			outpipe.write(inpipe.read(remainder))
+	except IOError:
+		pass
 
 
 def _skip_to_header(search, pipe):
@@ -205,7 +229,7 @@ def _skip_to_header(search, pipe):
 def _skip_to_line(search, pipe):
 	regex = hasattr(search, 'match')
 	o = pipe.readline()
-	while True:
+	while o:
 		if (search.match(o) if regex else o.startswith(search)) or not len(o):
 			return o
 		o = pipe.readline()
