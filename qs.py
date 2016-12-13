@@ -128,12 +128,72 @@ def http_body(inpipe, outpipe, args=[]):
 	_buffered_transfer(inpipe, outpipe)
 
 def http_content(inpipe, outpipe, args=[]):
+	content_length = None
+	chunked = None
+	gzipped = None
 	o = inpipe.readline()
+	while o.strip():
+		if o.startswith('Content-Length') and ':' in o:
+			try:
+				content_length = int(o.split(':')[1].strip())
+			except ValueError:
+				pass
+		chunked = chunked or o.startswith('Transfer-Encoding: chunked')
+		gzipped = gzipped or o.startswith('Content-Encoding: gzip')
+		o = inpipe.readline()
+	if not chunked:
+		if not gzipped:
+			_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+		else:
+			decoder = zlib.decompressobj(zlib.MAX_WBITS|16)
+			o = inpipe.read(chunksize)
+			while o:
+				outpipe.write(decoder.decompress(o))
+				o = inpipe.read(chunksize)
+		return
+	try:
+		o = inpipe.readline()
+		content_length = int(o.strip(), 16) if o else None
+		decoder = zlib.decompressobj(zlib.MAX_WBITS|16)
+		while content_length:
+			if not gzipped:
+				_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+			else:
+				outpipe.write(decoder.decompress(o))
+			o = _read_and_write_line(inpipe, outpipe)
+			if not o.strip():
+				o = _read_and_write_line(inpipe, outpipe)
+			content_length = int(o.strip(), 16) if o else None
+	except ValueError as e:
+		return
+
+
 	while True:
+		outpipe.write(o)
 		if not len(o.strip()):
 			break
+		if o.startswith('Content-Length') and ':' in o:
+			try:
+				content_length = int(o.split(':')[1].strip())
+			except ValueError:
+				pass
+		if o.startswith('Transfer-Encoding: chunked'):
+			chunked = True
 		o = inpipe.readline()
-	_buffered_transfer(inpipe, outpipe)
+	if not chunked:
+		_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+	else:
+		try:
+			o = _read_and_write_line(inpipe, outpipe)
+			content_length = int(o.strip(), 16) if o else None
+			while content_length:
+				_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+				o = _read_and_write_line(inpipe, outpipe)
+				if not o.strip():
+					o = _read_and_write_line(inpipe, outpipe)
+				content_length = int(o.strip(), 16) if o else None
+		except ValueError as e:
+			return
 
 def http_request(inpipe, outpipe, args=[]):
 	try:
@@ -171,15 +231,19 @@ def http_response(inpipe, outpipe, args=[]):
 	index = 0
 	content_length = None
 	chunked = None
+	response_code = None
 	for i in xrange(requested_index+1):
 		while True:
 			o = _skip_to_line('HTTP/', inpipe) or ''
-			if not '100 Continue' in o:
+			if ' ' in o:
+				try:
+					response_code = int(o.split(' ')[1])
+				except ValueError:
+					pass
+			if not response_code == 100:
 				break
-	while True:
+	while o.strip():
 		outpipe.write(o)
-		if not len(o.strip()):
-			break
 		if o.startswith('Content-Length') and ':' in o:
 			try:
 				content_length = int(o.split(':')[1].strip())
@@ -188,6 +252,8 @@ def http_response(inpipe, outpipe, args=[]):
 		if o.startswith('Transfer-Encoding: chunked'):
 			chunked = True
 		o = inpipe.readline()
+	if response_code == 304:
+		return
 	if not chunked:
 		_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
 	else:
