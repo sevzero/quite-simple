@@ -140,7 +140,7 @@ def http_request(inpipe, outpipe, args=[]):
 		requested_index = int(args[0]) if args else 0
 	except ValueError:
 		requested_index = 0
-	request_search = re.compile(r'^(GET|POST|HEAD|PUT|OPTIONS) .* HTTP/.*$')
+	request_search = re.compile(r'^(GET|POST|HEAD|PUT|OPTIONS|DELETE) .* HTTP/.*$')
 	content_length = None
 	expect = None
 	for i in xrange(requested_index+1):
@@ -173,7 +173,7 @@ def http_response(inpipe, outpipe, args=[]):
 	chunked = None
 	for i in xrange(requested_index+1):
 		while True:
-			o = _skip_to_line('HTTP/', inpipe)
+			o = _skip_to_line('HTTP/', inpipe) or ''
 			if not '100 Continue' in o:
 				break
 	while True:
@@ -190,17 +190,28 @@ def http_response(inpipe, outpipe, args=[]):
 		o = inpipe.readline()
 	if not chunked:
 		_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
-	try:
-		o = inpipe.readline()
-		content_length = int(o.strip(), 16)
-		while content_length:
-			_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
-			content_length = int(inpipe.readline().strip(), 16)
-	except ValueError:
-		return
-
+	else:
+		try:
+			o = _read_and_write_line(inpipe, outpipe)
+			content_length = int(o.strip(), 16) if o else None
+			while content_length:
+				_buffered_transfer(inpipe, outpipe, bytes=content_length, chunksize=chunksize)
+				o = _read_and_write_line(inpipe, outpipe)
+				if not o.strip():
+					o = _read_and_write_line(inpipe, outpipe)
+				content_length = int(o.strip(), 16) if o else None
+		except ValueError as e:
+			return
 
 # Utils
+
+def _read_and_write_line(inpipe, outpipe):
+	try:
+		o = inpipe.readline()
+		outpipe.write(o)
+		return o
+	except IOError:
+		return ''
 
 def _buffered_transfer(inpipe, outpipe, bytes=None, chunksize=4096):
 	remainder = None
@@ -226,10 +237,12 @@ def _skip_to_header(search, pipe):
 			return o.split(':')[1] if o else o
 		o = pipe.readline()
 
-def _skip_to_line(search, pipe):
+def _skip_to_line(search, pipe, outpipe=None):
 	regex = hasattr(search, 'match')
 	o = pipe.readline()
 	while o:
+		if outpipe:
+			outpipe.write(o)
 		if (search.match(o) if regex else o.startswith(search)) or not len(o):
 			return o
 		o = pipe.readline()
